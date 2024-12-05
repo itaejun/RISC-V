@@ -16,11 +16,9 @@ module CORE(
 );
     // IF
     wire [31:0] pc_next, pc, target_addr;
-    wire [31:0] im_addr_IF1, im_addr_IF2, im_addr_IF3;
-    assign pc_next = im_addr_IF3 + 32'b100;
+    wire [31:0] PCSrc_mux_o;
     assign im_cs = 1'b1; // Inst Mem 활성화
-
-    
+    assign IF_flush = (target_addr != 32'b0) ? 1'b1 : 1'b0;
     wire [0:0] PCSrc_sel_i;
 
     Multiplexer #( // 2 to 1 Mux
@@ -29,62 +27,60 @@ module CORE(
     ) PCSrc_mux (
         .i({target_addr, pc_next}),
         .i_sel(PCSrc_sel_i),
-        .o(im_addr_IF1)
+        .o(PCSrc_mux_o)
     );
     // assign im_addr_IF11 = (IF_flush_IF_o == 1'h1) ? branch addr + 4 : im_addr_IF1;
     Dregister_we_rst #(
         .WIDTH(32),
         .RESET_VALUE(32'h0)
     ) pc_register (
-        .i(im_addr_IF1),
-        .o(im_addr_IF2), 
+        .i(PCSrc_mux_o),
+        .o(pc), 
         .i_clk(clk),
         .i_rst(rst),
-        .i_we(1'h1)
+        .i_we(1'b1) // IF_flush_IF_o
     );
-    assign im_addr_IF3 = (IF_flush_IF_o || jump_control) ? target_addr :
-                         (PCWrite) ? im_addr_ID :
-                         im_addr_IF2;
-    assign im_addr = im_addr_IF3;
+    assign pc_next = (jump_control) ? target_addr : pc + 4;
 
-    
+    assign im_addr = pc;
+
     // IF_ID
-    wire [0:0] IF_flush_IF, IF_flush_IF_o;
+    wire [0:0] IF_flush, IF_flush_IF;
     Dregister_rst #(
         .WIDTH(1),
         .RESET_VALUE(1'h0)
-    ) Dreg_IF_flush_IF_o (
-        .i(IF_flush_IF),
-        .o(IF_flush_IF_o),
+    ) Dreg_IF_flush_IF (
+        .i(IF_flush),
+        .o(IF_flush_IF),
         .i_clk(clk),
         .i_rst(rst) // **********
     );
     wire [31:0] im_addr_ID, im_addr_ID1;
+    wire [31:0] inst_ID, inst_ID1;
+    // 명령어 레지스터
     Dregister_we_rst #(
         .WIDTH(32),
-        .RESET_VALUE(32'h0)
+        .RESET_VALUE(32'h0) // NOP
+    ) Dreg_inst (
+        .i(inst), // IF_Flush 시 NOP 입력
+        .o(inst_ID1),
+        .i_clk(clk),
+        .i_rst(rst),
+        .i_we(IF_IDWrite)
+    );
+    // 주소 레지스터
+    Dregister_we_rst #(
+        .WIDTH(32),
+        .RESET_VALUE(32'h0) // 초기화
     ) Dreg_im_addr_ID (
         .i(im_addr),
         .o(im_addr_ID1),
         .i_clk(clk),
-        .i_rst(rst), // **********
+        .i_rst(rst),
         .i_we(IF_IDWrite)
     );
-    wire [31:0] inst_ID, inst_ID1;
-    Dregister_we_rst #(
-        .WIDTH(32),
-        .RESET_VALUE(32'h0)
-    ) Dreg_inst (
-        .i(inst),
-        .o(inst_ID1),
-        .i_clk(clk),
-        .i_rst(rst), // **************
-        .i_we(IF_IDWrite)
-    );
-    assign im_addr_ID = (IF_flush_IF) ? 32'h0 : (im_addr_ID1);
-    assign inst_ID = (IF_flush_IF_o) ? 32'h0 : (inst_ID1);
-     // assign pc_next = (IF_flush_IF) ? (target_addr2 + 32'h4) : (im_addr_IF2 + 32'b100);
-
+    assign im_addr_ID = (IF_flush) ? 32'h0 : (im_addr_ID1);
+    assign inst_ID = (IF_flush_IF) ? 32'h0 : (inst_ID1);
     // ID
     wire [6:0] opcode;
     wire [2:0] funct3;
@@ -109,8 +105,8 @@ module CORE(
     
     Decode decode (
         .inst(inst_ID),
+        .IF_flush(IF_flush),
         .IF_flush_IF(IF_flush_IF),
-        .IF_flush_IF_o(IF_flush_IF_o),
         .opcode(opcode),
         .rs1_addr(rs1_addr),
         .rs2_addr(rs2_addr),
@@ -143,7 +139,6 @@ module CORE(
     
     wire [0:0] RegWrite, PCSrc, MemWrite, MemRead, MemtoReg;
     wire [1:0] ALUOp;
-    wire [0:0] IF_flush_ID;
     wire [31:0] return_addr_rd;
     Control control (
         .opcode(opcode),
@@ -156,21 +151,18 @@ module CORE(
 
         .rs1_data(rs1_data),
         .rs2_data(rs2_data),
-        .base_addr(im_addr_IF2 - 32'h4),
+        .base_addr(pc),
         .offset(imm_gen_o),
         .target_addr(target_addr),
         .PCSrc_sel(PCSrc_sel),
-        .IF_flush(IF_flush_ID),
+        .IF_flush_IF(IF_flush_IF),
 
         .return_addr_rd(return_addr_rd)
     );
     assign PCSrc_sel_i = PCSrc_sel;
-    assign IF_flush_IF = (opcode == 7'b1100011) ? IF_flush_ID : 1'b0;
     
     wire [6:0] control_signal, control_mux_o;
     assign control_signal = {ALUOp,PCSrc,MemWrite,MemRead,RegWrite,MemtoReg};
-
-    // assign rd_data = return_addr_rd;
 
    Multiplexer #( // 2 to 1 Mux
     .SEL_WIDTH(1),
@@ -193,15 +185,13 @@ module CORE(
         .i_clk(clk),             
         .i_rst(rst)       
     );
-    //wire [0:0] MemRead_ID 
-    //assign MemRead_ID = control_mux_o & 7'b0001000;
     // ID_EX
     wire [0:0] RegWrite_EX;
     Dregister_rst #(
         .WIDTH(1),
         .RESET_VALUE(1'h0)
     ) Dreg_RegWrite_EX (
-        .i(control_mux_o[5:5]),
+        .i(RegWrite),
         .o(RegWrite_EX),
         .i_clk(clk),
         .i_rst(rst)
@@ -211,7 +201,7 @@ module CORE(
         .WIDTH(1),
         .RESET_VALUE(1'h0)
     ) Dreg_MemtoReg_EX (
-        .i(control_mux_o[6:6]),
+        .i(MemtoReg),
         .o(MemtoReg_EX),
         .i_clk(clk),
         .i_rst(rst)
@@ -221,7 +211,7 @@ module CORE(
         .WIDTH(1),
         .RESET_VALUE(1'h0)
     ) Dreg_PCSrc_EX (
-        .i(control_mux_o[2:2]),
+        .i(PCSrc),
         .o(PCSrc_EX),
         .i_clk(clk),
         .i_rst(rst)
@@ -231,7 +221,7 @@ module CORE(
         .WIDTH(1),
         .RESET_VALUE(1'h0)
     ) Dreg_MemWrite_EX (
-        .i(control_mux_o[3:3]),
+        .i(MemWrite),
         .o(MemWrite_EX),
         .i_clk(clk),
         .i_rst(rst)
@@ -247,22 +237,12 @@ module CORE(
         .i_rst(rst)
     );
 
-    /*wire [0:0] ALUSrc_EX;
-    Dregister_rst #(
-        .WIDTH(1),
-        .RESET_VALUE(1'h0)
-    ) Dreg_ALUSrc_EX (
-        .i(ALUSrc),
-        .o(ALUSrc_EX),
-        .i_clk(clk),
-        .i_rst(rst)
-    );*/
     wire [1:0] ALUOp_EX;
     Dregister_rst #(
         .WIDTH(2),
         .RESET_VALUE(2'h0)
     ) Dreg_ALUOp_EX (
-        .i(control_mux_o[1:0]),
+        .i(ALUOp),
         .o(ALUOp_EX),
         .i_clk(clk),
         .i_rst(rst)
@@ -419,11 +399,10 @@ module CORE(
         .ALU_result(ALU_result)
     );
 
-    /* wire [31:0] target_addr_j, offset2;
+    /*wire [31:0] target_addr_j, offset2;
     assign offset2 = (opcode == 7'b1100111 || opcode == 7'b1101111 || opcode == 7'b110001) ?
                         (imm_gen_o - 32'h4) : 32'b0;
                         
-    wire [0:0] jump_control;
     assign jump_control = (opcode == 7'b1101111) ? 1'b1 : 1'b0;
     ADDER_Jump Adder_jump (
         .offset(offset2),
@@ -432,7 +411,7 @@ module CORE(
         .rd_addr(rd_addr_ID),
         .target_addr_j(target_addr_j)
     );
-    // assign target_addr = target_addr_j; */
+     //assign target_addr = target_addr_j; */
 
     // EX_MEM
     wire [0:0] RegWrite_MEM;
@@ -533,7 +512,6 @@ module CORE(
     assign dm_cs = (MemRead_MEM == 1'b1 || MemWrite_MEM) ? 1'b1 : 1'b0;
     assign dm_we = (dm_cs == 1'b1 && MemRead_MEM == 1'b0 && MemWrite_MEM == 1'b1) ?
                     32'hFFFF_FFFF : 32'b0;
-    //assign dm_rdata = (RegWrite && MemtoReg) ? MemtoReg_mux_output : 32'b0;
     
     // MEM_WB
     wire [0:0] RegWrite_WB;
@@ -609,7 +587,6 @@ endmodule
 module Control (
     input wire [6:0] opcode,
     output wire [0:0] RegWrite,
-    //output wire [0:0] ALUSrc,
     output wire [1:0] ALUOp,
     output wire [0:0] PCSrc,
     output wire [0:0] MemWrite,
@@ -622,38 +599,41 @@ module Control (
     input wire [31:0] offset,
     output wire [31:0] target_addr,
     output wire [0:0] PCSrc_sel,
-    output wire [0:0] IF_flush,
+    output wire [0:0] IF_flush_IF,
 
     output wire [31:0] return_addr_rd
 );
-
-    assign ALUOp = (opcode == 7'b0110011) ? 2'b10 :
-                (opcode == 7'b0000011 || opcode == 7'b0100011) ? 2'b00 :
-                (opcode == 7'b1100111 || opcode == 7'b1101111 || opcode == 7'b1100011) ? 2'b01 :
-                (opcode == 7'b0010011) ? 2'b11 :
-                2'b00; // Default case
-
-    assign PCSrc = (opcode == 7'b1100111) || (opcode == 7'b1101111 || opcode == 7'b1100011) ? 1'b1 :
-               1'b0; // Default case
-
-    assign MemRead = (opcode == 7'b0000011) ? 1'b1 : 1'b0; // Default case
-
-    assign MemWrite = (opcode == 7'b0100011) ? 1'b1 : 1'b0; 
-
-    assign MemtoReg = (opcode == 7'b0000011) ? 1'b1 : 1'b0;
-
-    assign RegWrite = (opcode == 7'b0110011 || opcode == 7'b0000011 || opcode == 7'b0010011) ? 
-                        1'b1 :1'b0; // Default case
-
     wire [0:0] zero;
-    assign zero = (rs1_data == rs2_data) ? 1'h1 : 1'h0;
-    assign PCSrc_sel = (zero & PCSrc) ? 1'h1 : 1'h0;
-    assign IF_flush = PCSrc_sel;
-    assign target_addr = (opcode == 7'b1101111) ? (base_addr + offset - 32'h4) : 
-                         (opcode == 7'b1100111) ? (rs1_data + offset) :
-                         base_addr + offset;
-    assign return_addr_rd = (opcode == 7'b1101111 || opcode == 7'b1100111) ? (base_addr) : 32'h0;
+    if(IF_flush_IF != 0) begin
+        assign ALUOp = (opcode == 7'b0110011 || opcode == 7'b1101111|| opcode == 7'b1100111) ? 2'b10 :
+                    (opcode == 7'b0000011 || opcode == 7'b0100011) ? 2'b00 :
+                    (opcode == 7'b1100011) ? 2'b01 :
+                    (opcode == 7'b0010011) ? 2'b11 :
+                    2'b00; 
 
+        assign PCSrc = (opcode == 7'b1100111) || (opcode == 7'b1101111 || opcode == 7'b1100011) ? 1'b1 :
+                1'b0;
+
+        assign MemRead = (opcode == 7'b0000011) ? 1'b1 : 1'b0; 
+
+        assign MemWrite = (opcode == 7'b0100011) ? 1'b1 : 1'b0; 
+
+        assign MemtoReg = (opcode == 7'b0000011) ? 1'b1 : 1'b0;
+
+        assign RegWrite = (opcode == 7'b0110011 || opcode == 7'b0000011 || opcode == 7'b0010011 || 
+                                opcode == 7'b1101111 || opcode == 7'b1100111) ? 1'b1 :1'b0; 
+
+        assign target_addr = (opcode == 7'b1101111) ? (base_addr + offset - 32'h4) : // jalr
+                        (opcode == 7'b1100111) ? (rs1_data + offset) : // jal
+                        (opcode == 7'b1100011) ? (offset) : 32'b0;  // beq
+                    
+        assign zero = (rs1_data == rs2_data) ? 1'h1 : 1'h0;
+        assign PCSrc_sel = (zero & PCSrc) ? 1'h1 : 1'h0;
+        assign return_addr_rd = (opcode == 7'b1101111 || opcode == 7'b1100111) ? (base_addr + 4) : 32'h0;
+    end
+    else begin
+        
+    end
 endmodule
 
 module ALUcontrol (
@@ -717,7 +697,7 @@ module Forwarding_Unit (
                             (RegWrite_WB && (rd_addr_WB != 0) && (rd_addr_WB == rs2_addr_EX)) ? 2'b01 :
                             (opcode_EX == 7'b0010011 || opcode_EX == 7'b0100011 || opcode_EX == 7'b0000011) ? 2'b11 :
                             2'b00;
-    
+
 endmodule
 
 module ALU(
@@ -733,12 +713,11 @@ module ALU(
             (ALUcontrol_input == 4'b0001) ? (ALU_mux_output1 | ALU_mux_output2) : // or
             32'b0; // Default value
 
-
 endmodule
 
 module Decode (
     input wire [31:0] inst,
-    input wire [0:0] IF_flush_IF, IF_flush_IF_o,
+    input wire [0:0] IF_flush, IF_flush_IF,
     output wire [6:0] opcode,
     output wire [4:0] rs1_addr,
     output wire [4:0] rs2_addr,
@@ -755,7 +734,7 @@ module Decode (
     assign rs2_addr = (opcode == 7'b0110011 || opcode == 7'b0100011 || opcode == 7'b1100011) ? {inst[0:0],inst[15:12]} : 
                      5'b0;
     assign rd_addr = ((opcode == 7'b1101111) || (opcode == 7'b1100111) || (opcode == 7'b0000011) || (opcode == 7'b0010011) || (opcode == 7'b0110011)) ? {inst[19:16],inst[31:31]} :
-                    (IF_flush_IF == 1'b0 || IF_flush_IF_o == 1'b0) ? 5'b0 :
+                    (IF_flush == 1'b0 || IF_flush_IF == 1'b0) ? 5'b0 :
                     5'b11110;
     assign imm = inst[31:0];
 
@@ -771,25 +750,6 @@ module Imm_Gen (
                 (opcode == 7'b0000011) ? {imm[7:0],imm[15:12]} : // LW
                 (opcode == 7'b1101111) ? ({imm[7:0],imm[15:8],imm[23:20]} >> 8 ) : // JAL
                 (opcode == 7'b1100111) ? {imm[7:0],imm[15:12]} : // JALR
-                (opcode == 7'b1100011) ? {imm[7:1],imm[19:16],imm[31]} : // BEQ
+                (opcode == 7'b1100011) ? ({imm[7:1],imm[19:16],imm[31]} << 1) : // BEQ
                 32'b0;
-endmodule
-
-module ADDER_Jump(
-    input wire [31:0] offset,
-    input wire [31:0] im_addr,
-    input wire [6:0] opcode,
-    input wire [4:0] rd_addr,
-    output wire [31:0] target_addr_j
-    
-);
-    assign target_addr_j = (opcode == 7'b1100111 || opcode == 7'b1101111) 
-                        ? (offset + im_addr) : 32'b0;
-endmodule
-
-module AND_GATE (
-    input [0:0] A, B,
-    output [0:0] result
-);
-    assign result = ((A == 1'b1) && (B == 1'b1)) ? 1'b1 : 1'b0;
 endmodule
